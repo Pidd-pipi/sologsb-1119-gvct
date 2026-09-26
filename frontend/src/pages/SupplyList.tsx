@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Paper from '@mui/material/Paper';
@@ -21,8 +22,16 @@ import TableCell from '@mui/material/TableCell';
 import AddIcon from '@mui/icons-material/Add';
 import { useSupplyStore } from '../stores/supplyStore';
 import { useSpecimenStore } from '../stores/specimenStore';
+import { useProcedureStore } from '../stores/procedureStore';
 import { MeasureField } from '../components/common/MeasureField';
 import { SUPPLY_KINDS, isLowStock, shelfLifeLeftDays, type SupplyKind, type SupplyLot, type SupplyLotDraft } from '../types/supply';
+
+function fmtTime(ts?: number): string {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
 const EMPTY_DRAFT: SupplyLotDraft = {
   name: '',
@@ -36,12 +45,14 @@ const EMPTY_DRAFT: SupplyLotDraft = {
   lowThreshold: 2,
 };
 
-/** /supplies 工具材料台账：按种类分组、批号追溯、低量行高亮 */
+/** /supplies 工具材料台账：按种类分组、批号追溯、低量行高亮、领用明细（含关联工序与退回状态） */
 export default function SupplyList() {
+  const navigate = useNavigate();
   const lots = useSupplyStore((s) => s.items);
   const addLot = useSupplyStore((s) => s.add);
   const issue = useSupplyStore((s) => s.issue);
   const specimens = useSpecimenStore((s) => s.items);
+  const procedures = useProcedureStore((s) => s.items);
 
   const [trace, setTrace] = useState('');
   const [kindFilter, setKindFilter] = useState<SupplyKind | 'all'>('all');
@@ -199,9 +210,19 @@ export default function SupplyList() {
                         {left < 0 ? <Chip size="small" color="error" label={`已过期 ${-left} 天`} /> : `${left} 天`}
                       </TableCell>
                       <TableCell>
-                        {lot.issues.length === 0
-                          ? '—'
-                          : `${lot.issues[0].operator} 领 ${lot.issues[0].qty} ${lot.unit}（${lot.issues[0].specimenNo}）`}
+                        {lot.issues.length === 0 ? (
+                          '—'
+                        ) : (
+                          <Stack direction="row" spacing={0.5} alignItems="center">
+                            <span>
+                              {lot.issues[0].operator} 领 {lot.issues[0].qty} {lot.unit}（
+                              {lot.issues[0].specimenNo}）
+                            </span>
+                            {lot.issues[0].status === 'returned' ? (
+                              <Chip size="small" color="warning" variant="outlined" label="已退回" />
+                            ) : null}
+                          </Stack>
+                        )}
                       </TableCell>
                       <TableCell align="right">
                         <Button
@@ -222,15 +243,56 @@ export default function SupplyList() {
               </TableBody>
             </Table>
           )}
-          {group.rows.some((r) => r.issues.length > 1) ? (
-            <Stack spacing={0.5} sx={{ mt: 1 }}>
+          {group.rows.some((r) => r.issues.length > 0) ? (
+            <Stack spacing={1} sx={{ mt: 1.5 }}>
               {group.rows
-                .filter((r) => r.issues.length > 1)
+                .filter((r) => r.issues.length > 0)
                 .map((r) => (
-                  <Typography key={r.id} variant="caption" color="text.secondary">
-                    批号 {r.lotNo} 的领用明细：
-                    {r.issues.map((i) => `${i.operator} ${i.qty}${r.unit}→${i.specimenNo}`).join('；')}
-                  </Typography>
+                  <Box key={r.id}>
+                    <Typography variant="caption" fontWeight={700} color="text.secondary">
+                      批号 {r.lotNo} 的领用明细（{r.issues.filter((i) => i.status !== 'returned').length} 条在用 /{' '}
+                      {r.issues.filter((i) => i.status === 'returned').length} 条已退回）
+                    </Typography>
+                    {r.issues.map((i) => {
+                      const proc = i.procedureId
+                        ? procedures.find((p) => p.id === i.procedureId)
+                        : undefined;
+                      return (
+                        <Stack
+                          key={i.id}
+                          direction="row"
+                          spacing={0.75}
+                          alignItems="center"
+                          flexWrap="wrap"
+                          sx={{ pl: 1.5 }}
+                        >
+                          <Typography variant="caption" color="text.secondary">
+                            {fmtTime(i.issuedAt)} · {i.operator} 领 {i.qty} {r.unit} → {i.specimenNo}
+                            {i.procedureLabel ? ` · 工序 ${i.procedureLabel}` : ' · 手动登记'}
+                          </Typography>
+                          {i.status === 'returned' ? (
+                            <Chip
+                              size="small"
+                              variant="outlined"
+                              color="warning"
+                              label={`已退回${i.returnedAt ? ` ${fmtTime(i.returnedAt)}` : ''}`}
+                            />
+                          ) : (
+                            <Chip size="small" variant="outlined" color="success" label="领用中" />
+                          )}
+                          {proc ? (
+                            <Button
+                              size="small"
+                              sx={{ p: 0, minWidth: 0, fontSize: 12 }}
+                              onClick={() => navigate(`/specimens/${proc.specimenId}`)}
+                            >
+                              查看标本
+                            </Button>
+                          ) : null}
+                        </Stack>
+                      );
+                    })}
+                  </Box>
                 ))}
             </Stack>
           ) : null}

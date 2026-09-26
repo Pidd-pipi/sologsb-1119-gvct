@@ -12,15 +12,32 @@ import Alert from '@mui/material/Alert';
 import Snackbar from '@mui/material/Snackbar';
 import FormControlLabel from '@mui/material/FormControlLabel';
 import Checkbox from '@mui/material/Checkbox';
+import IconButton from '@mui/material/IconButton';
+import AddIcon from '@mui/icons-material/Add';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
+import { useSupplyStore } from '../stores/supplyStore';
 import { usePrepProgress } from '../hooks/usePrepProgress';
 import { ProcedureTimeline } from '../components/common/ProcedureTimeline';
 import { MeasureField } from '../components/common/MeasureField';
-import { STEP_FIELD_MAP, STEP_TYPES, type StepType } from '../types/procedure';
+import {
+  STEP_FIELD_MAP,
+  STEP_SUPPLY_KINDS,
+  STEP_TYPES,
+  type MaterialUsage,
+  type PrepProcedure,
+  type StepType,
+} from '../types/procedure';
 import { db } from '../utils/db';
 import { newId } from '../utils/id';
 import { makeSketchDataUrl, type PrepPhoto } from '../types/photo';
+
+/** 表单中的一条材料领用行 */
+interface MaterialRow {
+  lotId: string;
+  qty: number;
+}
 
 /** /procedures/new 新建工序节点：选类型动态出字段，序号跳号报错 */
 export default function ProcedureForm() {
@@ -43,15 +60,33 @@ export default function ProcedureForm() {
   const [tempC, setTempC] = useState(22);
   const [rh, setRh] = useState(50);
   const [operator, setOperator] = useState('');
+  const [materialRows, setMaterialRows] = useState<MaterialRow[]>([]);
   const [withPhotos, setWithPhotos] = useState(true);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
 
+  const lots = useSupplyStore((s) => s.items);
   const progress = usePrepProgress(specimenId || undefined);
   const fieldMap = STEP_FIELD_MAP[stepType];
   const nextSeq = progress.list.length === 0 ? 1 : Math.max(...progress.list.map((it) => it.seq)) + 1;
 
   const specimen = useMemo(() => specimens.find((it) => it.id === specimenId), [specimens, specimenId]);
+
+  // 当前工序类型可领用的材料种类；在库为 0 的批次不提供选择（已选中的保留以便提示不足）
+  const allowedKinds = STEP_SUPPLY_KINDS[stepType];
+  const selectableLots = useMemo(
+    () =>
+      lots.filter(
+        (lot) =>
+          allowedKinds.includes(lot.kind) &&
+          (lot.qty > 0 || materialRows.some((r) => r.lotId === lot.id)),
+      ),
+    [lots, allowedKinds, materialRows],
+  );
+
+  const setMaterialRow = (index: number, patch: Partial<MaterialRow>) => {
+    setMaterialRows((rows) => rows.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  };
 
   const submit = async () => {
     if (!specimenId) {
@@ -80,24 +115,68 @@ export default function ProcedureForm() {
       return;
     }
 
-    const record = await addProcedure({
-      specimenId,
-      stepType,
-      nodeName: nodeName.trim(),
-      seq,
-      tools,
-      abrasive,
-      adhesive: fieldMap.adhesives.length > 0 ? adhesive : '',
-      adhesiveConc: fieldMap.needConc ? adhesiveConc : 0,
-      durationMin,
-      tempC,
-      rh,
-      photoBeforeIds: [],
-      photoAfterIds: [],
-      operator: operator.trim(),
-      startedAt: Date.now(),
-      state: 'pending',
-    });
+    // 材料领用校验：逐行核对在库，不足的批次一次性全部指出，本单不保存
+    if (materialRows.some((r) => !r.lotId)) {
+      setError('有材料行尚未选择在库批次，请补选或删除该行');
+      return;
+    }
+    const filledRows = materialRows.filter((r) => r.lotId);
+    const problems: string[] = [];
+    const materials: MaterialUsage[] = [];
+    for (const row of filledRows) {
+      const lot = lots.find((it) => it.id === row.lotId);
+      if (!lot) {
+        problems.push('所选批次已不存在，请移除后重选');
+        continue;
+      }
+      if (!Number.isFinite(row.qty) || row.qty <= 0) {
+        problems.push(`「${lot.name}（${lot.lotNo}）」用量需大于 0`);
+        continue;
+      }
+      if (row.qty > lot.qty) {
+        problems.push(`「${lot.name}（${lot.lotNo}）」在库 ${lot.qty} ${lot.unit}，不足本次用量 ${row.qty} ${lot.unit}`);
+        continue;
+      }
+      materials.push({
+        lotId: lot.id,
+        issueId: '',
+        name: lot.name,
+        lotNo: lot.lotNo,
+        qty: row.qty,
+        unit: lot.unit,
+      });
+    }
+    if (problems.length > 0) {
+      setError(`材料不足或无效，工序未保存：${problems.join('；')}`);
+      return;
+    }
+
+    let record: PrepProcedure;
+    try {
+      record = await addProcedure({
+        specimenId,
+        stepType,
+        nodeName: nodeName.trim(),
+        seq,
+        tools,
+        abrasive,
+        adhesive: fieldMap.adhesives.length > 0 ? adhesive : '',
+        adhesiveConc: fieldMap.needConc ? adhesiveConc : 0,
+        durationMin,
+        tempC,
+        rh,
+        photoBeforeIds: [],
+        photoAfterIds: [],
+        operator: operator.trim(),
+        startedAt: Date.now(),
+        state: 'pending',
+        materials,
+      });
+    } catch (e) {
+      // 事务内再次校验失败（如他处同时领用），工序未写入，直接展示哪一批不足
+      setError(e instanceof Error ? e.message : '保存失败，请重试');
+      return;
+    }
 
     if (withPhotos && specimen) {
       const before: PrepPhoto = {
@@ -122,9 +201,14 @@ export default function ProcedureForm() {
     }
 
     setError('');
-    setToast(`已追加工序节点 #${seq} ${stepType} · ${record.nodeName}`);
+    setToast(
+      materials.length > 0
+        ? `已追加工序节点 #${seq} ${stepType} · ${record.nodeName}，并联动扣减 ${materials.length} 个批次`
+        : `已追加工序节点 #${seq} ${stepType} · ${record.nodeName}`,
+    );
     setNodeName('');
     setTools([]);
+    setMaterialRows([]);
     setSeq(nextSeq + 1);
   };
 
@@ -176,6 +260,7 @@ export default function ProcedureForm() {
                   setTools([]);
                   setAbrasive('');
                   setAdhesive('');
+                  setMaterialRows([]);
                 }}
               >
                 {STEP_TYPES.map((t) => (
@@ -299,6 +384,86 @@ export default function ProcedureForm() {
               </Box>
             </Stack>
 
+            <Paper variant="outlined" sx={{ p: 1.5, bgcolor: 'grey.50' }}>
+              <Stack spacing={1.5}>
+                <Stack direction="row" alignItems="center" spacing={1}>
+                  <Typography variant="subtitle2" fontWeight={700}>
+                    材料领用（保存即扣减库存）
+                  </Typography>
+                  <Chip size="small" variant="outlined" label={`可选 ${allowedKinds.join(' / ')}`} />
+                  <Box sx={{ flex: 1 }} />
+                  <Button
+                    size="small"
+                    startIcon={<AddIcon />}
+                    disabled={selectableLots.filter((l) => !materialRows.some((r) => r.lotId === l.id)).length === 0}
+                    onClick={() => setMaterialRows((rows) => [...rows, { lotId: '', qty: 1 }])}
+                  >
+                    添加材料
+                  </Button>
+                </Stack>
+                {materialRows.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    本工序暂不领用材料；如需领用，点击「添加材料」选择在库批次并填写用量。
+                  </Typography>
+                ) : (
+                  materialRows.map((row, index) => {
+                    const lot = lots.find((it) => it.id === row.lotId);
+                    const insufficient = !!lot && Number.isFinite(row.qty) && row.qty > lot.qty;
+                    return (
+                      <Stack key={index} spacing={0.5}>
+                        <Stack direction="row" spacing={1} alignItems="flex-start">
+                          <TextField
+                            select
+                            size="small"
+                            fullWidth
+                            label="在库批次"
+                            value={row.lotId}
+                            error={insufficient}
+                            onChange={(e) => setMaterialRow(index, { lotId: e.target.value })}
+                          >
+                            {selectableLots.map((l) => (
+                              <MenuItem
+                                key={l.id}
+                                value={l.id}
+                                disabled={materialRows.some((r, i) => i !== index && r.lotId === l.id)}
+                              >
+                                {l.kind} · {l.name} · 批号 {l.lotNo} · 在库 {l.qty} {l.unit}
+                              </MenuItem>
+                            ))}
+                          </TextField>
+                          <Box sx={{ width: 180 }}>
+                            <MeasureField
+                              label="用量"
+                              unit={lot?.unit ?? '件'}
+                              min={0}
+                              max={lot?.qty ?? 100000}
+                              step={0.5}
+                              value={row.qty}
+                              onChange={(v) => setMaterialRow(index, { qty: v })}
+                              hint={lot ? `在库 ${lot.qty} ${lot.unit}` : undefined}
+                            />
+                          </Box>
+                          <IconButton
+                            size="small"
+                            aria-label="移除该材料"
+                            onClick={() => setMaterialRows((rows) => rows.filter((_, i) => i !== index))}
+                          >
+                            <DeleteOutlineIcon fontSize="small" />
+                          </IconButton>
+                        </Stack>
+                        {insufficient && lot ? (
+                          <Alert severity="warning" sx={{ py: 0 }}>
+                            批次「{lot.name}（{lot.lotNo}）」在库 {lot.qty} {lot.unit}，不足本次用量 {row.qty}{' '}
+                            {lot.unit}
+                          </Alert>
+                        ) : null}
+                      </Stack>
+                    );
+                  })
+                )}
+              </Stack>
+            </Paper>
+
             <TextField
               size="small"
               label="责任人"
@@ -334,12 +499,20 @@ export default function ProcedureForm() {
           <ProcedureTimeline
             items={progress.list}
             onFinish={async (pid) => {
-              await finish(pid);
-              setToast('节点已完成');
+              try {
+                await finish(pid);
+                setToast('节点已完成');
+              } catch (e) {
+                setToast(e instanceof Error ? e.message : '操作失败');
+              }
             }}
             onRollback={async (pid) => {
-              await rollback(pid);
-              setToast('节点已回退');
+              try {
+                await rollback(pid);
+                setToast('节点已回退，领用材料已退回台账');
+              } catch (e) {
+                setToast(e instanceof Error ? e.message : '操作失败');
+              }
             }}
           />
         </Paper>

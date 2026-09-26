@@ -1,3 +1,5 @@
+import type { SupplyKind } from './supply';
+
 /** 工序类型 */
 export type StepType = '清修' | '加固' | '粘接' | '补配' | '翻模';
 
@@ -40,8 +42,38 @@ export const STEP_FIELD_MAP: Record<
   },
 };
 
+/**
+ * 各工序类型可联动领用的材料种类（材料台账批次按此过滤）：
+ * 清修用工具/磨料/耗材，加固与粘接用工具/胶种/耗材，补配四类皆可，翻模用工具/胶种/耗材。
+ */
+export const STEP_SUPPLY_KINDS: Record<StepType, SupplyKind[]> = {
+  清修: ['工具', '磨料', '耗材'],
+  加固: ['工具', '胶种', '耗材'],
+  粘接: ['工具', '胶种', '耗材'],
+  补配: ['工具', '磨料', '胶种', '耗材'],
+  翻模: ['工具', '胶种', '耗材'],
+};
+
 /** 工序节点状态 */
 export type ProcedureState = 'pending' | 'done' | 'rolledback';
+
+/**
+ * 工序联动的材料批次用量：保存工序时即从对应批次扣减，
+ * 回退工序时按 issueId 把批次上的领用记录标记为已退回并补回数量。
+ */
+export interface MaterialUsage {
+  /** 材料批次 id */
+  lotId: string;
+  /** 对应的领用记录 id（保存时生成，回退时据此标记） */
+  issueId: string;
+  /** 批次名称快照，批次被删后工序侧仍可展示 */
+  name: string;
+  /** 批号快照 */
+  lotNo: string;
+  /** 本次用量 */
+  qty: number;
+  unit: string;
+}
 
 /** 修复工序 */
 export interface PrepProcedure {
@@ -72,6 +104,8 @@ export interface PrepProcedure {
   startedAt: number;
   state: ProcedureState;
   finishedAt?: number;
+  /** 本工序联动领用的材料批次与用量 */
+  materials: MaterialUsage[];
 }
 
 export type PrepProcedureDraft = Omit<PrepProcedure, 'id'>;

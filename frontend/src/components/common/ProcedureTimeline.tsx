@@ -107,6 +107,15 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                     {node.adhesiveConc > 0 ? `（浓度 ${node.adhesiveConc} %）` : ''}
                   </Typography>
                   <Typography variant="body2">
+                    材料：
+                    {node.materials && node.materials.length > 0
+                      ? node.materials.map((m) => `${m.name}（${m.lotNo}）×${m.qty} ${m.unit}`).join('、')
+                      : '—'}
+                    {node.state === 'rolledback' && node.materials && node.materials.length > 0
+                      ? '（已退回台账）'
+                      : ''}
+                  </Typography>
+                  <Typography variant="body2">
                     环境：{node.tempC} ℃ / RH {node.rh} %
                   </Typography>
                   <Typography variant="body2">开始：{fmtTime(node.startedAt)}</Typography>

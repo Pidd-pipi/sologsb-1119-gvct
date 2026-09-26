@@ -7,7 +7,7 @@ import { makeSketchDataUrl } from '../types/photo';
 import { newId } from './id';
 
 /** 当前数据结构版本，写入 localStorage 便于回显 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const DB_NAME = 'gbfossilprep';
 export const LS_VERSION_KEY = 'gbfossilprep:db-version';
 
@@ -54,6 +54,25 @@ class FossilPrepDB extends Dexie {
             if (row.lowThreshold === undefined) row.lowThreshold = 1;
           });
       });
+    // v3：工序与材料批次联动——工序增加 materials，领用记录增加状态与关联工序
+    this.version(3).upgrade(async (tx) => {
+      await tx
+        .table('procedures')
+        .toCollection()
+        .modify((row: any) => {
+          if (!row.materials) row.materials = [];
+        });
+      await tx
+        .table('supplies')
+        .toCollection()
+        .modify((row: any) => {
+          if (!row.issues) row.issues = [];
+          // 老领用记录一律视为领用中，不追溯其与工序的关联
+          row.issues.forEach((it: any) => {
+            if (!it.status) it.status = 'issued';
+          });
+        });
+    });
   }
 }
 
@@ -86,6 +105,9 @@ export async function ensureSeedData(): Promise<void> {
   const day = 24 * 3600 * 1000;
   const specimenId = newId('spm');
   const specimenId2 = newId('spm');
+  // 加固工序联动领用 Paraloid B-72 的批次与领用记录 id（工序、批次两侧互相引用）
+  const b72LotId = newId('sup');
+  const b72IssueId = newId('iss');
 
   const specimens: Specimen[] = [
     {
@@ -138,6 +160,7 @@ export async function ensureSeedData(): Promise<void> {
       startedAt: now - 10 * day,
       state: 'done',
       finishedAt: now - 10 * day + 145 * 60000,
+      materials: [],
     },
     {
       id: newId('prc'),
@@ -157,6 +180,16 @@ export async function ensureSeedData(): Promise<void> {
       operator: '林砚秋',
       startedAt: now - 6 * day,
       state: 'pending',
+      materials: [
+        {
+          lotId: b72LotId,
+          issueId: b72IssueId,
+          name: 'Paraloid B-72',
+          lotNo: 'B72-20240312',
+          qty: 1,
+          unit: '瓶',
+        },
+      ],
     },
   ];
 
@@ -185,7 +218,7 @@ export async function ensureSeedData(): Promise<void> {
 
   const supplies: SupplyLot[] = [
     {
-      id: newId('sup'),
+      id: b72LotId,
       name: 'Paraloid B-72',
       kind: '胶种',
       spec: '分析纯 500 g',
@@ -197,11 +230,14 @@ export async function ensureSeedData(): Promise<void> {
       lowThreshold: 2,
       issues: [
         {
-          id: newId('iss'),
+          id: b72IssueId,
           qty: 1,
           operator: '林砚秋',
           specimenNo: 'FP-2024-0031',
           issuedAt: now - 6 * day,
+          procedureId: procedures[1].id,
+          procedureLabel: `#${procedures[1].seq} ${procedures[1].stepType} · ${procedures[1].nodeName}`,
+          status: 'issued',
         },
       ],
     },

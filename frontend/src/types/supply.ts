@@ -25,6 +25,9 @@ export interface SupplyLot {
   issues: SupplyIssue[];
 }
 
+/** 领用记录状态：issued 领用中 / returned 已退回（工序回退时退回） */
+export type SupplyIssueStatus = 'issued' | 'returned';
+
 /** 领用登记 */
 export interface SupplyIssue {
   id: string;
@@ -32,6 +35,14 @@ export interface SupplyIssue {
   operator: string;
   specimenNo: string;
   issuedAt: number;
+  /** 关联工序 id（由新建工序联动领用时写入，手动领用为空） */
+  procedureId?: string;
+  /** 关联工序快照，形如「#2 加固 · 围岩裂隙渗透加固」 */
+  procedureLabel?: string;
+  /** 领用状态，老数据迁移后默认 issued */
+  status?: SupplyIssueStatus;
+  /** 退回时间（工序回退时写入，记录本体保留） */
+  returnedAt?: number;
 }
 
 export type SupplyLotDraft = Omit<SupplyLot, 'id' | 'issues'>;
