@@ -12,21 +12,36 @@ import Alert from '@mui/material/Alert';
 import Snackbar from '@mui/material/Snackbar';
 import FormControlLabel from '@mui/material/FormControlLabel';
 import Checkbox from '@mui/material/Checkbox';
+import Table from '@mui/material/Table';
+import TableHead from '@mui/material/TableHead';
+import TableBody from '@mui/material/TableBody';
+import TableRow from '@mui/material/TableRow';
+import TableCell from '@mui/material/TableCell';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
+import { useSupplyStore } from '../stores/supplyStore';
+import { StockShortageError } from '../stores/procedureStore';
 import { usePrepProgress } from '../hooks/usePrepProgress';
 import { ProcedureTimeline } from '../components/common/ProcedureTimeline';
 import { MeasureField } from '../components/common/MeasureField';
-import { STEP_FIELD_MAP, STEP_TYPES, type StepType } from '../types/procedure';
+import { STEP_FIELD_MAP, STEP_TYPES, STEP_TYPE_SUPPLY_KINDS, type StepType } from '../types/procedure';
+import type { SupplyLot } from '../types/supply';
+import { isLowStock } from '../types/supply';
 import { db } from '../utils/db';
 import { newId } from '../utils/id';
 import { makeSketchDataUrl, type PrepPhoto } from '../types/photo';
 
-/** /procedures/new 新建工序节点：选类型动态出字段，序号跳号报错 */
+interface SelectedLot {
+  lotId: string;
+  qty: number;
+}
+
+/** /procedures/new 新建工序节点：选类型动态出字段，序号跳号报错，材料批次联动领用 */
 export default function ProcedureForm() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const specimens = useSpecimenStore((s) => s.items);
+  const lots = useSupplyStore((s) => s.items);
   const addProcedure = useProcedureStore((s) => s.add);
   const finish = useProcedureStore((s) => s.finish);
   const rollback = useProcedureStore((s) => s.rollback);
@@ -44,7 +59,10 @@ export default function ProcedureForm() {
   const [rh, setRh] = useState(50);
   const [operator, setOperator] = useState('');
   const [withPhotos, setWithPhotos] = useState(true);
+  const [selectedLots, setSelectedLots] = useState<SelectedLot[]>([]);
   const [error, setError] = useState('');
+  /** 库存不足时逐批展示，配合 testid 便于定位 */
+  const [shortages, setShortages] = useState<{ lotNo: string; lotName: string; unit: string; need: number; available: number }[]>([]);
   const [toast, setToast] = useState('');
 
   const progress = usePrepProgress(specimenId || undefined);
@@ -52,6 +70,31 @@ export default function ProcedureForm() {
   const nextSeq = progress.list.length === 0 ? 1 : Math.max(...progress.list.map((it) => it.seq)) + 1;
 
   const specimen = useMemo(() => specimens.find((it) => it.id === specimenId), [specimens, specimenId]);
+
+  /** 当前工序类型可领用的批次（磨料/胶种/耗材，在库 > 0） */
+  const eligibleLots = useMemo(() => {
+    const kinds = STEP_TYPE_SUPPLY_KINDS[stepType];
+    return lots
+      .filter((l) => kinds.includes(l.kind) && l.qty > 0)
+      .sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name) || a.lotNo.localeCompare(b.lotNo));
+  }, [lots, stepType]);
+
+  const selectedMap = useMemo(() => new Map(selectedLots.map((s) => [s.lotId, s])), [selectedLots]);
+
+  const toggleLot = (lot: SupplyLot, checked: boolean) => {
+    setError('');
+    setShortages([]);
+    setSelectedLots((prev) =>
+      checked
+        ? [...prev, { lotId: lot.id, qty: 1 }]
+        : prev.filter((s) => s.lotId !== lot.id),
+    );
+  };
+
+  const changeLotQty = (lotId: string, qty: number) => {
+    setShortages([]);
+    setSelectedLots((prev) => prev.map((s) => (s.lotId === lotId ? { ...s, qty } : s)));
+  };
 
   const submit = async () => {
     if (!specimenId) {
@@ -80,24 +123,61 @@ export default function ProcedureForm() {
       return;
     }
 
-    const record = await addProcedure({
-      specimenId,
-      stepType,
-      nodeName: nodeName.trim(),
-      seq,
-      tools,
-      abrasive,
-      adhesive: fieldMap.adhesives.length > 0 ? adhesive : '',
-      adhesiveConc: fieldMap.needConc ? adhesiveConc : 0,
-      durationMin,
-      tempC,
-      rh,
-      photoBeforeIds: [],
-      photoAfterIds: [],
-      operator: operator.trim(),
-      startedAt: Date.now(),
-      state: 'pending',
+    // 提交前本地再校验一次用量，直接指出哪一批不足
+    const localShortages = selectedLots
+      .map((s) => {
+        const lot = lots.find((l) => l.id === s.lotId)!;
+        return { s, lot };
+      })
+      .filter(({ s, lot }) => !Number.isFinite(s.qty) || s.qty <= 0 || s.qty !== Math.floor(s.qty) || lot.qty < s.qty)
+      .map(({ s, lot }) => ({
+        lotNo: lot.lotNo,
+        lotName: lot.name,
+        unit: lot.unit,
+        need: Number.isFinite(s.qty) ? s.qty : 0,
+        available: lot.qty,
+      }));
+    if (localShortages.length > 0) {
+      setShortages(localShortages);
+      setError('库存不足或用量不合法，工序未保存');
+      return;
+    }
+
+    const materialUsages = selectedLots.map((s) => {
+      const lot = lots.find((l) => l.id === s.lotId)!;
+      return { lotId: lot.id, lotNo: lot.lotNo, lotName: lot.name, unit: lot.unit, qty: s.qty };
     });
+
+    let record;
+    try {
+      record = await addProcedure({
+        specimenId,
+        stepType,
+        nodeName: nodeName.trim(),
+        seq,
+        tools,
+        abrasive,
+        adhesive: fieldMap.adhesives.length > 0 ? adhesive : '',
+        adhesiveConc: fieldMap.needConc ? adhesiveConc : 0,
+        durationMin,
+        tempC,
+        rh,
+        photoBeforeIds: [],
+        photoAfterIds: [],
+        operator: operator.trim(),
+        startedAt: Date.now(),
+        state: 'pending',
+        materialUsages,
+      });
+    } catch (e) {
+      // 事务已回滚：工序与库存均未改动
+      if (e instanceof StockShortageError) {
+        setShortages(e.shortages.map((s) => ({ lotNo: s.lotNo, lotName: s.lotName, unit: s.unit, need: s.need, available: s.available })));
+        setError('库存不足，本单工序未写入');
+        return;
+      }
+      throw e;
+    }
 
     if (withPhotos && specimen) {
       const before: PrepPhoto = {
@@ -122,7 +202,9 @@ export default function ProcedureForm() {
     }
 
     setError('');
-    setToast(`已追加工序节点 #${seq} ${stepType} · ${record.nodeName}`);
+    setShortages([]);
+    setSelectedLots([]);
+    setToast(`已追加工序节点 #${seq} ${stepType} · ${record.nodeName}，材料库存已同步扣减`);
     setNodeName('');
     setTools([]);
     setSeq(nextSeq + 1);
@@ -176,6 +258,8 @@ export default function ProcedureForm() {
                   setTools([]);
                   setAbrasive('');
                   setAdhesive('');
+                  setSelectedLots([]);
+                  setShortages([]);
                 }}
               >
                 {STEP_TYPES.map((t) => (
@@ -278,6 +362,100 @@ export default function ProcedureForm() {
                 ) : null}
               </Stack>
             ) : null}
+
+            <Paper variant="outlined" sx={{ p: 1.5, bgcolor: 'grey.50' }} data-testid="material-picker">
+              <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }} flexWrap="wrap">
+                <Typography variant="subtitle2" fontWeight={700}>
+                  领用材料批次（{stepType}）
+                </Typography>
+                <Chip size="small" label={`已选 ${selectedLots.length} 项`} />
+                <Typography variant="caption" color="text.secondary">
+                  勾选在库批次并填写用量，保存工序时立即扣减；不选则只登工序、不动库存
+                </Typography>
+              </Stack>
+              {eligibleLots.length === 0 ? (
+                <Typography variant="body2" color="text.secondary">
+                  当前类型下没有在库批次，可先到「材料台账」登记。
+                </Typography>
+              ) : (
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell padding="checkbox">选</TableCell>
+                      <TableCell>名称</TableCell>
+                      <TableCell>规格</TableCell>
+                      <TableCell>批号</TableCell>
+                      <TableCell align="right">在库</TableCell>
+                      <TableCell align="right" sx={{ width: 150 }}>
+                        用量
+                      </TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {eligibleLots.map((lot) => {
+                      const sel = selectedMap.get(lot.id);
+                      const low = isLowStock(lot);
+                      return (
+                        <TableRow
+                          key={lot.id}
+                          hover
+                          data-testid={`material-lot-${lot.lotNo}`}
+                          selected={!!sel}
+                          sx={shortages.some((s) => s.lotNo === lot.lotNo) ? { bgcolor: 'error.light' } : undefined}
+                        >
+                          <TableCell padding="checkbox">
+                            <Checkbox
+                              size="small"
+                              checked={!!sel}
+                              onChange={(e) => toggleLot(lot, e.target.checked)}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            {lot.name}（{lot.kind}）
+                            {low ? <Chip size="small" color="warning" label="低量" sx={{ ml: 1 }} /> : null}
+                          </TableCell>
+                          <TableCell>{lot.spec}</TableCell>
+                          <TableCell>{lot.lotNo}</TableCell>
+                          <TableCell align="right">
+                            {lot.qty} {lot.unit}
+                          </TableCell>
+                          <TableCell align="right">
+                            {sel ? (
+                              <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5 }}>
+                                <TextField
+                                  size="small"
+                                  type="number"
+                                  sx={{ width: 90 }}
+                                  inputProps={{ min: 1, max: lot.qty, step: 1 }}
+                                  value={Number.isFinite(sel.qty) ? sel.qty : ''}
+                                  onChange={(e) =>
+                                    changeLotQty(lot.id, e.target.value === '' ? NaN : Number(e.target.value))
+                                  }
+                                  error={!Number.isFinite(sel.qty) || sel.qty <= 0 || sel.qty > lot.qty}
+                                />
+                                <Typography variant="caption">{lot.unit}</Typography>
+                              </Box>
+                            ) : (
+                              '—'
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              )}
+              {shortages.length > 0 ? (
+                <Alert severity="error" sx={{ mt: 1 }} data-testid="shortage-alert">
+                  以下批次库存不足，工序未保存：
+                  {shortages.map((s) => (
+                    <Box key={s.lotNo} component="span" sx={{ display: 'block' }} data-testid={`shortage-${s.lotNo}`}>
+                      「{s.lotName}」批号 {s.lotNo}：需 {s.need} {s.unit}，在库仅 {s.available} {s.unit}
+                    </Box>
+                  ))}
+                </Alert>
+              ) : null}
+            </Paper>
 
             <Stack direction="row" spacing={1.5}>
               <Box sx={{ flex: 1 }}>

@@ -7,7 +7,7 @@ import { makeSketchDataUrl } from '../types/photo';
 import { newId } from './id';
 
 /** 当前数据结构版本，写入 localStorage 便于回显 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const DB_NAME = 'gbfossilprep';
 export const LS_VERSION_KEY = 'gbfossilprep:db-version';
 
@@ -52,6 +52,32 @@ class FossilPrepDB extends Dexie {
           .modify((row: any) => {
             if (!row.issues) row.issues = [];
             if (row.lowThreshold === undefined) row.lowThreshold = 1;
+          });
+      });
+    // v3：工序与材料批次联动。工序补 materialUsages，领用记录补 status（老记录视为已领用）
+    this.version(3)
+      .stores({
+        specimens: 'id, specimenNo, taxon, locality, status, createdAt',
+        procedures: 'id, specimenId, seq, stepType, state, startedAt',
+        supplies: 'id, kind, lotNo, name, openedAt',
+        photos: 'id, specimenId, procedureId, stage, capturedAt',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('procedures')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.materialUsages === undefined) row.materialUsages = [];
+          });
+        await tx
+          .table('supplies')
+          .toCollection()
+          .modify((row: any) => {
+            if (!Array.isArray(row.issues)) row.issues = [];
+            row.issues.forEach((iss: any) => {
+              // v2 及以前没有状态字段，历史领用一律按"已领用"保留，不影响当前在库数
+              if (!iss.status) iss.status = 'issued';
+            });
           });
       });
   }
@@ -118,9 +144,22 @@ export async function ensureSeedData(): Promise<void> {
     },
   ];
 
+  // 先把领用记录与工序 id 固定下来，便于互相引用（联动领用 + 已退回示例）
+  const proc1Id = newId('prc');
+  const proc2Id = newId('prc');
+  const proc3Id = newId('prc');
+  const lotB72Id = newId('sup');
+  const lotSicId = newId('sup');
+  const lotNeedleId = newId('sup');
+  const issManualId = newId('iss');
+  const issSicId = newId('iss');
+  const issNeedleId = newId('iss');
+  const issB72PendingId = newId('iss');
+  const issB72ReturnedId = newId('iss');
+
   const procedures: PrepProcedure[] = [
     {
-      id: newId('prc'),
+      id: proc1Id,
       specimenId,
       stepType: '清修',
       nodeName: '左侧肩胛区粗清',
@@ -138,9 +177,13 @@ export async function ensureSeedData(): Promise<void> {
       startedAt: now - 10 * day,
       state: 'done',
       finishedAt: now - 10 * day + 145 * 60000,
+      materialUsages: [
+        { lotId: lotSicId, lotNo: 'SIC-800-2401', lotName: '碳化硅磨料', unit: '袋', qty: 1, issueId: issSicId },
+        { lotId: lotNeedleId, lotNo: 'NEEDLE-2312', lotName: '气动笔针头', unit: '支', qty: 2, issueId: issNeedleId },
+      ],
     },
     {
-      id: newId('prc'),
+      id: proc2Id,
       specimenId,
       stepType: '加固',
       nodeName: '围岩裂隙渗透加固',
@@ -157,6 +200,31 @@ export async function ensureSeedData(): Promise<void> {
       operator: '林砚秋',
       startedAt: now - 6 * day,
       state: 'pending',
+      materialUsages: [
+        { lotId: lotB72Id, lotNo: 'B72-20240312', lotName: 'Paraloid B-72', unit: '瓶', qty: 1, issueId: issB72PendingId },
+      ],
+    },
+    {
+      id: proc3Id,
+      specimenId,
+      stepType: '粘接',
+      nodeName: '右下颌碎块试拼（已回退）',
+      seq: 3,
+      tools: ['点胶针'],
+      abrasive: '',
+      adhesive: 'Paraloid B-72',
+      adhesiveConc: 8,
+      durationMin: 40,
+      tempC: 22,
+      rh: 46,
+      photoBeforeIds: [],
+      photoAfterIds: [],
+      operator: '林砚秋',
+      startedAt: now - 4 * day,
+      state: 'rolledback',
+      materialUsages: [
+        { lotId: lotB72Id, lotNo: 'B72-20240312', lotName: 'Paraloid B-72', unit: '瓶', qty: 1, issueId: issB72ReturnedId },
+      ],
     },
   ];
 
@@ -185,51 +253,104 @@ export async function ensureSeedData(): Promise<void> {
 
   const supplies: SupplyLot[] = [
     {
-      id: newId('sup'),
+      id: lotB72Id,
       name: 'Paraloid B-72',
       kind: '胶种',
       spec: '分析纯 500 g',
       lotNo: 'B72-20240312',
-      qty: 4,
+      // 初始 5 瓶：手工领 1、#2 加固领 1、#3 粘接领 1 后回退 1 → 在库 3
+      qty: 3,
       unit: '瓶',
       openedAt: now - 40 * day,
       shelfLifeMonths: 36,
       lowThreshold: 2,
       issues: [
         {
-          id: newId('iss'),
+          id: issB72PendingId,
           qty: 1,
           operator: '林砚秋',
           specimenNo: 'FP-2024-0031',
           issuedAt: now - 6 * day,
+          status: 'issued',
+          procedureId: proc2Id,
+          procedureSeq: 2,
+          stepType: '加固',
+          nodeName: '围岩裂隙渗透加固',
+        },
+        {
+          id: issB72ReturnedId,
+          qty: 1,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 4 * day,
+          status: 'returned',
+          procedureId: proc3Id,
+          procedureSeq: 3,
+          stepType: '粘接',
+          nodeName: '右下颌碎块试拼（已回退）',
+          returnedAt: now - 3 * day,
+        },
+        {
+          id: issManualId,
+          qty: 1,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 6 * day,
+          status: 'issued',
         },
       ],
     },
     {
-      id: newId('sup'),
+      id: lotSicId,
       name: '碳化硅磨料',
       kind: '磨料',
       spec: '800 目 1 kg',
       lotNo: 'SIC-800-2401',
-      qty: 1,
+      qty: 2,
       unit: '袋',
       openedAt: now - 60 * day,
       shelfLifeMonths: 60,
       lowThreshold: 2,
-      issues: [],
+      issues: [
+        {
+          id: issSicId,
+          qty: 1,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 10 * day,
+          status: 'issued',
+          procedureId: proc1Id,
+          procedureSeq: 1,
+          stepType: '清修',
+          nodeName: '左侧肩胛区粗清',
+        },
+      ],
     },
     {
-      id: newId('sup'),
+      id: lotNeedleId,
       name: '气动笔针头',
       kind: '耗材',
       spec: '钨钢 2.3 mm',
       lotNo: 'NEEDLE-2312',
-      qty: 18,
+      qty: 16,
       unit: '支',
       openedAt: now - 90 * day,
       shelfLifeMonths: 120,
       lowThreshold: 5,
-      issues: [],
+      issues: [
+        {
+          id: issNeedleId,
+          qty: 2,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          issuedAt: now - 10 * day,
+          status: 'issued',
+          procedureId: proc1Id,
+          procedureSeq: 1,
+          stepType: '清修',
+          nodeName: '左侧肩胛区粗清',
+        },
+      ],
     },
     {
       id: newId('sup'),

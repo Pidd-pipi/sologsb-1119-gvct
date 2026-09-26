@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Paper from '@mui/material/Paper';
@@ -36,6 +36,13 @@ const EMPTY_DRAFT: SupplyLotDraft = {
   lowThreshold: 2,
 };
 
+function fmtTime(ts?: number): string {
+  if (!ts) return '—';
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 /** /supplies 工具材料台账：按种类分组、批号追溯、低量行高亮 */
 export default function SupplyList() {
   const lots = useSupplyStore((s) => s.items);
@@ -51,6 +58,7 @@ export default function SupplyList() {
   const [issueQty, setIssueQty] = useState(1);
   const [issueOperator, setIssueOperator] = useState('');
   const [issueSpecimen, setIssueSpecimen] = useState('');
+  const [expandedLot, setExpandedLot] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
 
@@ -178,62 +186,126 @@ export default function SupplyList() {
                 {group.rows.map((lot) => {
                   const low = isLowStock(lot);
                   const left = shelfLifeLeftDays(lot);
+                  const latest = lot.issues[0];
+                  const open = expandedLot === lot.id;
                   return (
-                    <TableRow
-                      key={lot.id}
-                      hover
-                      data-testid={`supply-row-${lot.lotNo}`}
-                      sx={low ? { bgcolor: 'warning.light' } : undefined}
-                    >
-                      <TableCell>
-                        {lot.name}
-                        {low ? <Chip size="small" color="warning" label="低量" sx={{ ml: 1 }} /> : null}
-                      </TableCell>
-                      <TableCell>{lot.spec}</TableCell>
-                      <TableCell>{lot.lotNo}</TableCell>
-                      <TableCell align="right">
-                        {lot.qty} {lot.unit}
-                      </TableCell>
-                      <TableCell align="right">{lot.lowThreshold}</TableCell>
-                      <TableCell align="right">
-                        {left < 0 ? <Chip size="small" color="error" label={`已过期 ${-left} 天`} /> : `${left} 天`}
-                      </TableCell>
-                      <TableCell>
-                        {lot.issues.length === 0
-                          ? '—'
-                          : `${lot.issues[0].operator} 领 ${lot.issues[0].qty} ${lot.unit}（${lot.issues[0].specimenNo}）`}
-                      </TableCell>
-                      <TableCell align="right">
-                        <Button
-                          size="small"
-                          disabled={lot.qty <= 0}
-                          onClick={() => {
-                            setIssueTarget(lot);
-                            setIssueQty(1);
-                            setError('');
-                          }}
-                        >
-                          领用
-                        </Button>
-                      </TableCell>
-                    </TableRow>
+                    <Fragment key={lot.id}>
+                      <TableRow
+                        hover
+                        data-testid={`supply-row-${lot.lotNo}`}
+                        sx={low ? { bgcolor: 'warning.light' } : undefined}
+                      >
+                        <TableCell>
+                          {lot.name}
+                          {low ? <Chip size="small" color="warning" label="低量" sx={{ ml: 1 }} /> : null}
+                        </TableCell>
+                        <TableCell>{lot.spec}</TableCell>
+                        <TableCell>{lot.lotNo}</TableCell>
+                        <TableCell align="right">
+                          {lot.qty} {lot.unit}
+                        </TableCell>
+                        <TableCell align="right">{lot.lowThreshold}</TableCell>
+                        <TableCell align="right">
+                          {left < 0 ? <Chip size="small" color="error" label={`已过期 ${-left} 天`} /> : `${left} 天`}
+                        </TableCell>
+                        <TableCell>
+                          {!latest ? (
+                            '—'
+                          ) : latest.procedureId ? (
+                            <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">
+                              <Chip
+                                size="small"
+                                color={latest.status === 'returned' ? 'error' : 'primary'}
+                                variant="outlined"
+                                label={latest.status === 'returned' ? '已退回' : '工序领用'}
+                              />
+                              <Typography variant="caption">
+                                #{latest.procedureSeq} {latest.stepType} · {latest.operator} 领 {latest.qty} {lot.unit}
+                              </Typography>
+                            </Stack>
+                          ) : (
+                            <Chip
+                              size="small"
+                              color={latest.status === 'returned' ? 'error' : 'default'}
+                              variant="outlined"
+                              label={`手工领用 · ${latest.operator} 领 ${latest.qty} ${lot.unit}`}
+                            />
+                          )}
+                        </TableCell>
+                        <TableCell align="right">
+                          <Button
+                            size="small"
+                            disabled={lot.qty <= 0}
+                            onClick={() => {
+                              setIssueTarget(lot);
+                              setIssueQty(1);
+                              setError('');
+                            }}
+                          >
+                            领用
+                          </Button>
+                          <Button
+                            size="small"
+                            disabled={lot.issues.length === 0}
+                            onClick={() => setExpandedLot(open ? null : lot.id)}
+                            data-testid={`issues-toggle-${lot.lotNo}`}
+                          >
+                            明细 {lot.issues.length > 0 ? `(${lot.issues.length})` : ''}
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                      {open ? (
+                        <TableRow data-testid={`issues-detail-${lot.lotNo}`}>
+                          <TableCell colSpan={8} sx={{ py: 1, bgcolor: 'grey.50' }}>
+                            <Table size="small">
+                              <TableHead>
+                                <TableRow>
+                                  <TableCell>状态</TableCell>
+                                  <TableCell>用量</TableCell>
+                                  <TableCell>操作人</TableCell>
+                                  <TableCell>关联工序</TableCell>
+                                  <TableCell>用于标本</TableCell>
+                                  <TableCell>领用时间</TableCell>
+                                  <TableCell>退回时间</TableCell>
+                                </TableRow>
+                              </TableHead>
+                              <TableBody>
+                                {[...lot.issues]
+                                  .sort((a, b) => b.issuedAt - a.issuedAt)
+                                  .map((iss) => (
+                                    <TableRow key={iss.id}>
+                                      <TableCell>
+                                        <Chip
+                                          size="small"
+                                          color={iss.status === 'returned' ? 'error' : 'success'}
+                                          label={iss.status === 'returned' ? '已退回（已回库）' : '已领用'}
+                                        />
+                                      </TableCell>
+                                      <TableCell>
+                                        {iss.qty} {lot.unit}
+                                      </TableCell>
+                                      <TableCell>{iss.operator}</TableCell>
+                                      <TableCell>
+                                        {iss.procedureId
+                                          ? `#${iss.procedureSeq} ${iss.stepType} · ${iss.nodeName}`
+                                          : '台账手工领用'}
+                                      </TableCell>
+                                      <TableCell>{iss.specimenNo}</TableCell>
+                                      <TableCell>{fmtTime(iss.issuedAt)}</TableCell>
+                                      <TableCell>{iss.status === 'returned' ? fmtTime(iss.returnedAt) : '—'}</TableCell>
+                                    </TableRow>
+                                  ))}
+                              </TableBody>
+                            </Table>
+                          </TableCell>
+                        </TableRow>
+                      ) : null}
+                    </Fragment>
                   );
                 })}
               </TableBody>
             </Table>
           )}
-          {group.rows.some((r) => r.issues.length > 1) ? (
-            <Stack spacing={0.5} sx={{ mt: 1 }}>
-              {group.rows
-                .filter((r) => r.issues.length > 1)
-                .map((r) => (
-                  <Typography key={r.id} variant="caption" color="text.secondary">
-                    批号 {r.lotNo} 的领用明细：
-                    {r.issues.map((i) => `${i.operator} ${i.qty}${r.unit}→${i.specimenNo}`).join('；')}
-                  </Typography>
-                ))}
-            </Stack>
-          ) : null}
         </Paper>
       ))}
 

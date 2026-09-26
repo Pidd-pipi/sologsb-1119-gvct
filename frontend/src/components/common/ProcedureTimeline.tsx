@@ -109,6 +109,17 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                   <Typography variant="body2">
                     环境：{node.tempC} ℃ / RH {node.rh} %
                   </Typography>
+                  <Typography variant="body2">
+                    材料领用：
+                    {node.materialUsages && node.materialUsages.length > 0
+                      ? node.materialUsages
+                          .map((u) => `${u.lotName}（批号 ${u.lotNo}）${u.qty}${u.unit}`)
+                          .join('；')
+                      : '—'}
+                    {node.state === 'rolledback' && node.materialUsages && node.materialUsages.length > 0 ? (
+                      <Chip size="small" color="error" variant="outlined" label="用量已退回" sx={{ ml: 1 }} />
+                    ) : null}
+                  </Typography>
                   <Typography variant="body2">开始：{fmtTime(node.startedAt)}</Typography>
                   <Typography variant="body2">结束：{fmtTime(node.finishedAt)}</Typography>
                   <Typography variant="body2">

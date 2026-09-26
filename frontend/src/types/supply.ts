@@ -25,6 +25,9 @@ export interface SupplyLot {
   issues: SupplyIssue[];
 }
 
+/** 领用记录状态：issued 已领用（在库已扣减）/ returned 已退回（工序回退，数量已回库） */
+export type SupplyIssueStatus = 'issued' | 'returned';
+
 /** 领用登记 */
 export interface SupplyIssue {
   id: string;
@@ -32,7 +35,19 @@ export interface SupplyIssue {
   operator: string;
   specimenNo: string;
   issuedAt: number;
+  status: SupplyIssueStatus;
+  /** 关联工序：工序联动领用时写入；台账手工领用为空 */
+  procedureId?: string;
+  /** 关联工序快照字段（防止工序日后删除导致明细断链） */
+  procedureSeq?: number;
+  stepType?: string;
+  nodeName?: string;
+  /** 退回入库时间，status=returned 时写入 */
+  returnedAt?: number;
 }
+
+/** 台账手工领用的入参 */
+export type ManualIssuePayload = Pick<SupplyIssue, 'qty' | 'operator' | 'specimenNo'>;
 
 export type SupplyLotDraft = Omit<SupplyLot, 'id' | 'issues'>;
 
